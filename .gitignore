@@ -1,0 +1,6 @@
+bin
+data
+assets
+.vscode
+build
+*.png
