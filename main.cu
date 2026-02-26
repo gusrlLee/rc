@@ -11,6 +11,8 @@
 #include <algorithm>
 
 #include "math.cuh"
+#include "structs.cuh"
+#include "kernel.cuh"
 
 __global__ void cascadeTestKernel(cudaSurfaceObject_t surface, int width, int height)
 {
@@ -29,15 +31,24 @@ __global__ void cascadeTestKernel(cudaSurfaceObject_t surface, int width, int he
     }
 }
 
-void launchCascadeKernel(cudaSurfaceObject_t surface, int width, int height)
+void launchComputeCascade0(float4* cascadeBuffer, CascadeLevel* metaData, int gridW, int gridH) 
 {
+    dim3 blockSize(16, 16);
+    dim3 gridSize((gridW + blockSize.x - 1) / blockSize.x,
+                  (gridH + blockSize.y - 1) / blockSize.y);
+                  
+    computeCascade0Kernel<<<gridSize, blockSize>>>(cascadeBuffer, metaData);
+    cudaDeviceSynchronize();
+}
+
+
+
+void launchVisualizeCascade0(cudaSurfaceObject_t surface, float4* cascadeBuffer, CascadeLevel* metaData, int width, int height) {
     dim3 blockSize(16, 16);
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x,
                   (height + blockSize.y - 1) / blockSize.y);
-
-    cascadeTestKernel<<<gridSize, blockSize>>>(surface, width, height);
-
-    // 에러 체크 및 동기화 (디버깅에 유용합니다)
+                  
+    visualizeCascade0Kernel<<<gridSize, blockSize>>>(surface, cascadeBuffer, metaData, width, height);
     cudaDeviceSynchronize();
 }
 
@@ -61,7 +72,7 @@ int main()
         return -1;
     }
 
-    int width = 1080, height = 720;
+    int width = 800, height = 600;
 
     // 3. 텍스처 생성 (기존 코드와 동일)
     GLuint glTexture;
@@ -82,6 +93,21 @@ int main()
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTexture, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
+    int numCascades = 4;
+    std::vector<CascadeLevel> cascades = buildCascadeHierarchy(width, height, numCascades);
+    CascadeLevel& lastLevel = cascades.back();
+    
+    int totalProbesData = lastLevel.dataOffset + (lastLevel.gridWidth * lastLevel.gridHeight * lastLevel.numDirections);
+
+    float4* d_cascadeBuffer = nullptr;
+    cudaMalloc(&d_cascadeBuffer, totalProbesData * sizeof(float4));
+    cudaMemset(d_cascadeBuffer, 0, totalProbesData * sizeof(float4));
+
+    // Cascade 메타데이터도 GPU로 복사 (커널에서 간격, 오프셋 등을 읽기 위함)
+    CascadeLevel* d_cascadesMeta = nullptr;
+    cudaMalloc(&d_cascadesMeta, cascades.size() * sizeof(CascadeLevel));
+    cudaMemcpy(d_cascadesMeta, cascades.data(), cascades.size() * sizeof(CascadeLevel), cudaMemcpyHostToDevice);
+
     // 5. 렌더링 루프 내부
     while (!glfwWindowShouldClose(window))
     {
@@ -95,17 +121,19 @@ int main()
         cudaSurfaceObject_t surface;
         cudaCreateSurfaceObject(&surface, &resDesc);
 
-        // CUDA 커널 실행 (주석 해제!)
-        launchCascadeKernel(surface, width, height);
+        // [추가됨] 1. Raymarching으로 빛 계산 후 버퍼에 저장
+        launchComputeCascade0(d_cascadeBuffer, d_cascadesMeta, cascades[0].gridWidth, cascades[0].gridHeight);
+
+        // [추가됨] 2. 계산된 버퍼 데이터를 화면 텍스처(surface)에 기록
+        launchVisualizeCascade0(surface, d_cascadeBuffer, d_cascadesMeta, width, height);
 
         cudaDestroySurfaceObject(surface);
         cudaGraphicsUnmapResources(1, &cudaResource, 0);
 
         // 6. 결과 확인을 위한 Blit (화면에 그리기)
         glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // 0은 기본 윈도우 프레임버퍼
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); 
         
-        // FBO에 연결된 텍스처를 화면 크기에 맞춰 복사
         glBlitFramebuffer(0, 0, width, height,
                           0, 0, width, height,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
