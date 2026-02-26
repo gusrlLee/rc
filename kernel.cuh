@@ -4,6 +4,7 @@
 #include "math.cuh"
 #include "structs.cuh"
 
+// [논문 Page 2, 10] Emission (발광체) 정의: 논문의 수식 (2), (8) 등에서 등장하는 물체가 내뿜는 빛(L_emi)을 정의하는 부분입니다.
 __device__ float sceneSDF(float2 p, float4 &outEmission)
 {
     float2 center = make_float2(400.0f, 300.0f);
@@ -23,6 +24,7 @@ __device__ float sceneSDF(float2 p, float4 &outEmission)
 }
 
 // --- 2. Cascade 0 레이마칭 커널 ---
+// [논문 Page 10] 2.3 Radiance Interval 의 기초적인 단일 Cascade 테스트용 레거시 커널입니다.
 __global__ void computeCascade0Kernel(float4 *cascadeBuffer, CascadeLevel *metaData)
 {
     CascadeLevel level = metaData[0]; // Cascade 0 정보 가져오기
@@ -51,6 +53,7 @@ __global__ void computeCascade0Kernel(float4 *cascadeBuffer, CascadeLevel *metaD
         float stepSize = 1.0f;       // 1픽셀 단위로 전진 (나중에는 SDF를 활용해 최적화 가능)
 
         // 정해진 최대 거리(rayRangeMax)까지만 빛을 탐색
+        // [논문 Page 10] 수식 (6): 구간 [a, b]에 대한 탐색
         while (t < level.rayRangeMax)
         {
             float2 samplePos = make_float2(probePos.x + dir.x * t, probePos.y + dir.y * t);
@@ -73,7 +76,7 @@ __global__ void computeCascade0Kernel(float4 *cascadeBuffer, CascadeLevel *metaD
 }
 
 
-
+// [논문 Page 18] 2.6 Calculating indirect lighting (확산광 적분) 및 최종 출력
 __global__ void visualizeCascade0Kernel(cudaSurfaceObject_t surface, float4* cascadeBuffer, CascadeLevel* metaData, int width, int height) {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -83,6 +86,7 @@ __global__ void visualizeCascade0Kernel(cudaSurfaceObject_t surface, float4* cas
     CascadeLevel level = metaData[0]; // Cascade 0 정보
 
     // 1. 프로브 그리드 상의 연속적인(실수) 좌표 계산
+    // [논문 Page 14] 2.4 Radiance cascades: 데이터가 왜곡 없이 선형 보간(Linear Interpolation)됨을 이용
     // 픽셀의 중앙 위치를 기준으로 보간하기 위해 0.5f를 더해 조정합니다.
     float probeX = ((float)px + 0.5f) / level.probeSpacing - 0.5f;
     float probeY = ((float)py + 0.5f) / level.probeSpacing - 0.5f;
@@ -98,6 +102,7 @@ __global__ void visualizeCascade0Kernel(cudaSurfaceObject_t surface, float4* cas
     float ty = probeY - floorf(probeY);
 
     // 특정 프로브의 Irradiance(모든 방향의 빛의 평균)를 구하는 헬퍼 람다
+    // [논문 Page 18] 수식 없이 설명됨: 확산광(Diffuse)을 얻기 위해 이산적인 방향 샘플들을 적분(평균)합니다.
     auto getIrradiance = [&](int x, int y) {
         int baseIdx = level.dataOffset + (y * level.gridWidth + x) * level.numDirections;
         float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -119,6 +124,7 @@ __global__ void visualizeCascade0Kernel(cudaSurfaceObject_t surface, float4* cas
     float4 c11 = getIrradiance(px1, py1);
 
     // 4. 이중 선형 보간 (Bilinear Interpolation)
+    // [논문 Page 14] 공간적 보간을 통해 픽셀화 아티팩트 제거
     // X축 보간
     float3 cx0 = make_float3(
         c00.x * (1 - tx) + c10.x * tx,
@@ -147,7 +153,9 @@ __global__ void visualizeCascade0Kernel(cudaSurfaceObject_t surface, float4* cas
     surf2Dwrite(finalColor, surface, px * sizeof(float4), py);
 }
 
-#if 0
+#if 1
+// [논문 Page 34] Section 5: Limitations (이산화 아티팩트를 발생시키는 옛날/미사용 코드)
+// 점 샘플링(Point sampling) 기반이라 거리가 멀어지면 빛을 놓치는 사다리꼴(Banding) 현상을 유발합니다.
 __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData, int levelIdx) {
     CascadeLevel level = metaData[levelIdx];
 
@@ -163,7 +171,7 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
         float angle = (2.0f * 3.14159265f * d) / level.numDirections;
         float2 dir = make_float2(cosf(angle), sinf(angle));
 
-        // w 채널은 Transparency(Beta) 값입니다. 기본값 1.0f (투명)
+        // [논문 Page 11] 수식 (9) 투명도 (Beta) - w 채널은 Transparency(Beta) 값입니다. 기본값 1.0f (투명)
         float4 accumulatedRadiance = make_float4(0, 0, 0, 1.0f);
         float t = level.rayRangeMin;
         float stepSize = 1.0f; 
@@ -185,6 +193,8 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
     }
 }
 #else
+// [논문 Page 8] 2.1 The Penumbra condition (Cone Tracing 적용 최적화 코드)
+// 얇은 선 대신 거리에 비례하여 커지는 원뿔(Cone)을 추적해 이산화 아티팩트 해결
 __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData, int levelIdx) {
     CascadeLevel level = metaData[levelIdx];
 
@@ -193,17 +203,18 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
 
     if (px >= level.gridWidth || py >= level.gridHeight) return;
 
-    // 수정됨: 프로브의 중심점(0.5f)을 기준으로 정확한 좌표 계산
+    // 수정됨: 프로브의 중심점(0.5f)을 기준으로 정확한 좌표 계산 (논문 Page 14의 보간 정확도 향상)
     float2 probePos = make_float2((px + 0.5f) * level.probeSpacing, (py + 0.5f) * level.probeSpacing);
     int probeBaseIndex = level.dataOffset + (py * level.gridWidth + px) * level.numDirections;
 
-    // 현재 Cascade의 한 방향이 차지하는 각도 (원뿔의 너비)
+    // [논문 Page 9] 수식 (5): 현재 Cascade의 한 방향이 차지하는 각도 (원뿔의 너비, \Delta \omega)
     float coneAngle = (2.0f * 3.14159265f) / level.numDirections;
 
     for (int d = 0; d < level.numDirections; ++d) {
         float angle = coneAngle * d;
         float2 dir = make_float2(cosf(angle), sinf(angle));
 
+        // [논문 Page 11] 수식 (10): 구간 투명도(\beta). w 채널이 \beta를 의미함
         float4 accumulatedRadiance = make_float4(0, 0, 0, 1.0f);
         float t = level.rayRangeMin;
 
@@ -213,7 +224,7 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
             float4 emission;
             float dist = sceneSDF(samplePos, emission);
 
-            // 수정됨: 현재 거리 t에서 원뿔(Cone)의 반지름 계산
+            // 수정됨: 현재 거리 t에서 원뿔(Cone)의 반지름 계산 (논문 Page 8의 \Delta p <= D 와 연관)
             float coneRadius = fmaxf(t * coneAngle * 0.5f, 1.0f); // 최소 1픽셀 두께 보장
 
             // 광선이 물체와 교차했는지 확인 (부드러운 충돌 - Soft Intersection)
@@ -227,7 +238,7 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
                 accumulatedRadiance.y += emission.y * accumulatedRadiance.w * coverage;
                 accumulatedRadiance.z += emission.z * accumulatedRadiance.w * coverage;
 
-                // 차단된 만큼 투명도(Beta) 감소
+                // [논문 Page 12] 수식 (11)에 기반한 차단량(Beta 감소)
                 accumulatedRadiance.w *= (1.0f - coverage);
             }
 
@@ -241,7 +252,9 @@ __global__ void computeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaDa
 #endif
 
 __global__ void mergeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData, int lowerLevelIdx) {
-#if 0
+#if 1
+    // (미사용 레거시 코드) 
+    // 프로브 좌표계에 0.5 중심점 보정을 하지 않아 공간 보간 시 격자 어긋남(Aliasing)을 유발했던 옛날 방식입니다.
     CascadeLevel lower = metaData[lowerLevelIdx];
     CascadeLevel upper = metaData[lowerLevelIdx + 1];
 
@@ -267,6 +280,7 @@ __global__ void mergeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData
     float tx = upperX - floorf(upperX);
     float ty = upperY - floorf(upperY);
 #else
+    // [논문 Page 14] 2.4 Radiance cascades - 완벽한 선형 보간을 위한 좌표계 보정 (0.5f) 적용 버전
     CascadeLevel lower = metaData[lowerLevelIdx];
     CascadeLevel upper = metaData[lowerLevelIdx + 1];
 
@@ -295,6 +309,8 @@ __global__ void mergeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData
 
     for (int d = 0; d < lower.numDirections; ++d) {
         
+        // [논문 Page 14] Angular filtering (각도 보간)
+        // 상위 레벨의 더 많은 방향(해상도)을 하위 레벨로 부드럽게 가져와 '성게 모양(Angular aliasing)' 방지
         // 1. 각도 필터링을 포함하여 상위 레벨의 Radiance를 가져오는 헬퍼 람다
         auto getFilteredUpper = [&](int x, int y) {
             int baseIdx = upper.dataOffset + (y * upper.gridWidth + x) * upper.numDirections;
@@ -323,6 +339,7 @@ __global__ void mergeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData
         float4 c01 = getFilteredUpper(ux0, uy1);
         float4 c11 = getFilteredUpper(ux1, uy1);
 
+        // [논문 Page 14] Spatial Interpolation (공간적 이중 선형 보간)
         // 2. 공간적 보간 (Bilinear - 기존과 같지만 w채널(beta)도 함께 보간)
         float4 cx0 = make_float4(
             c00.x * (1 - tx) + c10.x * tx, c00.y * (1 - tx) + c10.y * tx, c00.z * (1 - tx) + c10.z * tx, c00.w * (1 - tx) + c10.w * tx);
@@ -332,6 +349,9 @@ __global__ void mergeCascadeKernel(float4* cascadeBuffer, CascadeLevel* metaData
         float4 upperRadiance = make_float4(
             cx0.x * (1 - ty) + cx1.x * ty, cx0.y * (1 - ty) + cx1.y * ty, cx0.z * (1 - ty) + cx1.z * ty, cx0.w * (1 - ty) + cx1.w * ty);
 
+        // [논문 Page 12] 2.3.1 Merging radiance intervals: 수식 (11)
+        // L_{a,c} = L_{a,b} + \beta_{a,b} * L_{b,c}
+        // 하위 구간 빛(lower)에 상위 구간 빛(upper)을 더할 때, 하위 구간의 투명도(beta)만큼 곱해서 더함
         // 3. 병합 공식 적용: L_lower = L_lower + Beta_lower * L_upper
         float4& lowerRadiance = cascadeBuffer[lowerBaseIndex + d];
         
