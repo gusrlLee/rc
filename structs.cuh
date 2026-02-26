@@ -23,10 +23,16 @@ inline std::vector<CascadeLevel> buildCascadeHierarchy(int screenW, int screenH,
     std::vector<CascadeLevel> cascades;
     int currentOffset = 0;
     
-    // 초기 설정
-    int currentSpacing = 2; // Cascade 0은 2x2 픽셀마다 1개
-    int currentDirs = 4;    // Cascade 0은 4방향
-    float currentRange = 4.0f; // 초기 Ray 탐색 거리
+    // // 초기 설정
+    // int currentSpacing = 2; // Cascade 0은 2x2 픽셀마다 1개
+    // int currentDirs = 4;    // Cascade 0은 4방향
+    // float currentRange = 4.0f; // 초기 Ray 탐색 거리
+    // float startRange = 0.0f;
+
+
+    int currentSpacing = 2;    // 그대로 유지 (2x2)
+    int currentDirs = 8;       // 변경: 4방향 -> 8방향으로 시작
+    float currentRange = 4.0f; // 그대로 유지
     float startRange = 0.0f;
 
     for (int i = 0; i < numCascades; ++i) {

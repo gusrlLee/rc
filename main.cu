@@ -41,8 +41,6 @@ void launchComputeCascade0(float4* cascadeBuffer, CascadeLevel* metaData, int gr
     cudaDeviceSynchronize();
 }
 
-
-
 void launchVisualizeCascade0(cudaSurfaceObject_t surface, float4* cascadeBuffer, CascadeLevel* metaData, int width, int height) {
     dim3 blockSize(16, 16);
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x,
@@ -50,6 +48,19 @@ void launchVisualizeCascade0(cudaSurfaceObject_t surface, float4* cascadeBuffer,
                   
     visualizeCascade0Kernel<<<gridSize, blockSize>>>(surface, cascadeBuffer, metaData, width, height);
     cudaDeviceSynchronize();
+}
+
+
+void launchComputeCascade(float4* buffer, CascadeLevel* meta, int levelIdx, int w, int h) {
+    dim3 blockSize(16, 16);
+    dim3 gridSize((w + blockSize.x - 1) / blockSize.x, (h + blockSize.y - 1) / blockSize.y);
+    computeCascadeKernel<<<gridSize, blockSize>>>(buffer, meta, levelIdx);
+}
+
+void launchMergeCascade(float4* buffer, CascadeLevel* meta, int lowerLevelIdx, int w, int h) {
+    dim3 blockSize(16, 16);
+    dim3 gridSize((w + blockSize.x - 1) / blockSize.x, (h + blockSize.y - 1) / blockSize.y);
+    mergeCascadeKernel<<<gridSize, blockSize>>>(buffer, meta, lowerLevelIdx);
 }
 
 int main()
@@ -93,7 +104,7 @@ int main()
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTexture, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
-    int numCascades = 4;
+    int numCascades = 6;
     std::vector<CascadeLevel> cascades = buildCascadeHierarchy(width, height, numCascades);
     CascadeLevel& lastLevel = cascades.back();
     
@@ -114,29 +125,42 @@ int main()
         cudaGraphicsMapResources(1, &cudaResource, 0);
         cudaArray_t cuArray;
         cudaGraphicsSubResourceGetMappedArray(&cuArray, cudaResource, 0, 0);
-
         cudaResourceDesc resDesc = {};
         resDesc.resType = cudaResourceTypeArray;
         resDesc.res.array.array = cuArray;
         cudaSurfaceObject_t surface;
         cudaCreateSurfaceObject(&surface, &resDesc);
 
-        // [추가됨] 1. Raymarching으로 빛 계산 후 버퍼에 저장
-        launchComputeCascade0(d_cascadeBuffer, d_cascadesMeta, cascades[0].gridWidth, cascades[0].gridHeight);
+        // ----------------------------------------------------
+        // [1] 모든 Cascade 레벨에 대해 독립적으로 Raymarching 실행
+        // ----------------------------------------------------
+        for (int i = 0; i < numCascades; ++i) {
+            launchComputeCascade(d_cascadeBuffer, d_cascadesMeta, i, cascades[i].gridWidth, cascades[i].gridHeight);
+        }
 
-        // [추가됨] 2. 계산된 버퍼 데이터를 화면 텍스처(surface)에 기록
+        cudaDeviceSynchronize(); // 동기화 보장
+
+        // ----------------------------------------------------
+        // [2] Top-Down 방식으로 Cascade 병합 (Merge)
+        // 최상위 레벨에서 시작하여 레벨 0까지 내려옵니다.
+        // ----------------------------------------------------
+        for (int i = numCascades - 2; i >= 0; --i) {
+            launchMergeCascade(d_cascadeBuffer, d_cascadesMeta, i, cascades[i].gridWidth, cascades[i].gridHeight);
+            cudaDeviceSynchronize();
+        }
+
+        // ----------------------------------------------------
+        // [3] 최종적으로 모든 빛이 모인 Cascade 0을 화면 텍스처에 시각화
+        // ----------------------------------------------------
         launchVisualizeCascade0(surface, d_cascadeBuffer, d_cascadesMeta, width, height);
 
         cudaDestroySurfaceObject(surface);
         cudaGraphicsUnmapResources(1, &cudaResource, 0);
 
-        // 6. 결과 확인을 위한 Blit (화면에 그리기)
+        // 프레임버퍼 Blit (화면에 그리기)
         glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); 
-        
-        glBlitFramebuffer(0, 0, width, height,
-                          0, 0, width, height,
-                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
